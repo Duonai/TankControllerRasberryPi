@@ -22,10 +22,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-complexity", type=int, default=1, choices=(0, 1, 2))
     parser.add_argument("--min-detection-conf", type=float, default=0.5)
     parser.add_argument("--min-tracking-conf", type=float, default=0.5)
-    parser.add_argument("--yaw-deadzone-deg", type=float, default=12.0, help="Right forearm tilt deadzone in degrees")
-    parser.add_argument("--yaw-full-scale-deg", type=float, default=55.0, help="Right forearm tilt that maps to full turret speed")
+    parser.add_argument("--yaw-deadzone-deg", type=float, default=18.0, help="Forearm tilt deadzone in degrees")
+    parser.add_argument("--yaw-full-scale-deg", type=float, default=55.0, help="Forearm tilt that maps to full turret speed")
     parser.add_argument("--pitch-deadzone", type=float, default=0.12, help="Neutral band as a fraction of torso height")
-    parser.add_argument("--pitch-full-scale", type=float, default=0.38, help="Left wrist travel for full barrel speed")
+    parser.add_argument("--pitch-full-scale", type=float, default=0.38, help="Wrist travel for full barrel speed")
     parser.add_argument("--relaxed-ratio", type=float, default=0.42, help="Comfortable wrist height below shoulders")
     return parser.parse_args()
 
@@ -48,12 +48,55 @@ def body_metrics(pose_landmarks) -> Optional[Tuple[np.ndarray, float, float]]:
     return shoulder_center, torso_height, shoulder_width
 
 
-def split_hands(hand_results):
+def wrist_distance_sq(hand_landmarks, wrist_landmark) -> float:
+    hand_wrist = hand_landmarks.landmark[0]
+    dx = float(hand_wrist.x - wrist_landmark.x)
+    dy = float(hand_wrist.y - wrist_landmark.y)
+    return dx * dx + dy * dy
+
+
+def split_hands(hand_results, pose_landmarks=None):
     left_hand_landmarks = None
     right_hand_landmarks = None
 
     if hand_results.multi_hand_landmarks is None:
         return left_hand_landmarks, right_hand_landmarks
+
+    if pose_landmarks is not None:
+        left_pose_wrist = pose_landmarks.landmark[15]
+        right_pose_wrist = pose_landmarks.landmark[16]
+        if landmark_has_xy(left_pose_wrist) and landmark_has_xy(right_pose_wrist):
+            hands_with_costs = []
+            for hand_landmarks in hand_results.multi_hand_landmarks:
+                hands_with_costs.append(
+                    (
+                        hand_landmarks,
+                        wrist_distance_sq(hand_landmarks, left_pose_wrist),
+                        wrist_distance_sq(hand_landmarks, right_pose_wrist),
+                    )
+                )
+
+            if len(hands_with_costs) == 1:
+                hand_landmarks, left_cost, right_cost = hands_with_costs[0]
+                if left_cost <= right_cost:
+                    left_hand_landmarks = hand_landmarks
+                else:
+                    right_hand_landmarks = hand_landmarks
+                return left_hand_landmarks, right_hand_landmarks
+
+            best_total = None
+            best_pair = (None, None)
+            for left_index, (left_candidate, left_cost, _) in enumerate(hands_with_costs):
+                for right_index, (right_candidate, _, right_cost) in enumerate(hands_with_costs):
+                    if left_index == right_index:
+                        continue
+                    total_cost = left_cost + right_cost
+                    if best_total is None or total_cost < best_total:
+                        best_total = total_cost
+                        best_pair = (left_candidate, right_candidate)
+
+            if best_pair[0] is not None or best_pair[1] is not None:
+                return best_pair
 
     handedness_list = hand_results.multi_handedness or []
     for index, hand_landmarks in enumerate(hand_results.multi_hand_landmarks):
@@ -108,7 +151,7 @@ def compute_forearm_yaw_deg(pose_landmarks, elbow_idx: int, wrist_idx: int, hand
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:
         return None
 
-    return float(np.degrees(np.arctan2(dx, max(abs(dy), 1e-6))))
+    return float(np.degrees(np.arctan2(dx, -dy)))
 
 
 def yaw_label(value: float) -> str:
@@ -146,21 +189,20 @@ def draw_status(
     cv2.putText(frame, f"L hand: {left_state}", (16, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 200, 0), 2, cv2.LINE_AA)
     cv2.putText(frame, f"R hand: {right_state}", (16, 154), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 200), 2, cv2.LINE_AA)
     cv2.putText(frame, fire_text, (16, 186), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
-    cv2.putText(frame, "Right wrist up/down = barrel", (16, 214), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (220, 220, 220), 2, cv2.LINE_AA)
-    cv2.putText(frame, "Left forearm tilt = turret", (16, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (220, 220, 220), 2, cv2.LINE_AA)
+    cv2.putText(frame, "Left arm up/down = barrel", (16, 214), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (220, 220, 220), 2, cv2.LINE_AA)
+    cv2.putText(frame, "Right arm forearm tilt = turret/fire", (16, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (220, 220, 220), 2, cv2.LINE_AA)
     cv2.putText(frame, "Press q or ESC to exit", (16, 266), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
 
-def draw_pitch_guides(frame: np.ndarray, pose_landmarks, shoulder_idx: int, relaxed_y: Optional[float], deadzone: float, torso_height: Optional[float]) -> None:
+def draw_pitch_guides(frame: np.ndarray, anchor_x: Optional[float], relaxed_y: Optional[float], deadzone: float, torso_height: Optional[float]) -> None:
     if relaxed_y is None or torso_height is None:
         return
 
-    height, width = frame.shape[:2]
-    shoulder = pose_landmarks.landmark[shoulder_idx]
-    if not landmark_has_xy(shoulder):
+    if anchor_x is None:
         return
 
-    shoulder_x = int(shoulder.x * width)
+    height, width = frame.shape[:2]
+    shoulder_x = int(anchor_x * width)
     relaxed_line = int(relaxed_y * height)
     deadzone_px = int(deadzone * torso_height * height)
     x1 = max(shoulder_x - 70, 0)
@@ -168,6 +210,53 @@ def draw_pitch_guides(frame: np.ndarray, pose_landmarks, shoulder_idx: int, rela
     cv2.line(frame, (x1, relaxed_line), (x2, relaxed_line), (255, 255, 255), 2)
     cv2.line(frame, (x1, relaxed_line - deadzone_px), (x2, relaxed_line - deadzone_px), (0, 220, 0), 1)
     cv2.line(frame, (x1, relaxed_line + deadzone_px), (x2, relaxed_line + deadzone_px), (0, 100, 255), 1)
+
+
+def draw_yaw_guides(
+    frame: np.ndarray,
+    pose_landmarks,
+    elbow_idx: int,
+    wrist_idx: int,
+    deadzone_deg: float,
+) -> None:
+    elbow = pose_landmarks.landmark[elbow_idx]
+    wrist = pose_landmarks.landmark[wrist_idx]
+    if not landmark_has_xy(elbow) or not landmark_has_xy(wrist):
+        return
+
+    height, width = frame.shape[:2]
+    elbow_px = np.array((int(elbow.x * width), int(elbow.y * height)), dtype=np.int32)
+    wrist_px = np.array((int(wrist.x * width), int(wrist.y * height)), dtype=np.int32)
+    forearm_length = max(int(np.linalg.norm(wrist_px - elbow_px)), 36)
+    guide_radius = min(max(int(forearm_length * 0.75), 42), 90)
+    guide_color = (255, 80, 80)
+    boundary_color = (255, 0, 255)
+
+    cv2.circle(frame, tuple(elbow_px), guide_radius, guide_color, 1)
+    cv2.line(
+        frame,
+        tuple(elbow_px),
+        (int(elbow_px[0]), int(elbow_px[1] - guide_radius)),
+        guide_color,
+        1,
+    )
+
+    for angle_deg, color in ((-deadzone_deg, boundary_color), (deadzone_deg, boundary_color)):
+        angle_rad = np.radians(angle_deg)
+        end_x = int(elbow_px[0] + np.sin(angle_rad) * guide_radius)
+        end_y = int(elbow_px[1] - np.cos(angle_rad) * guide_radius)
+        cv2.line(frame, tuple(elbow_px), (end_x, end_y), color, 2)
+
+    cv2.putText(
+        frame,
+        f"STOP +/-{deadzone_deg:.0f} deg",
+        (int(elbow_px[0] - guide_radius), max(int(elbow_px[1] - guide_radius - 8), 20)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        boundary_color,
+        1,
+        cv2.LINE_AA,
+    )
 
 
 def main() -> None:
@@ -206,7 +295,7 @@ def main() -> None:
                 hand_results = hand_model.process(rgb)
                 rgb.flags.writeable = True
 
-                left_hand_landmarks, right_hand_landmarks = split_hands(hand_results)
+                left_hand_landmarks, right_hand_landmarks = split_hands(hand_results, pose_results.pose_landmarks)
 
                 yaw_value = 0.0
                 yaw_deg = None
@@ -222,22 +311,30 @@ def main() -> None:
                     metrics = body_metrics(pose_results.pose_landmarks)
                     if metrics is not None:
                         shoulder_center, torso_height, shoulder_width = metrics
-                        right_wrist = resolve_wrist_landmark(pose_results.pose_landmarks, 16, right_hand_landmarks)
+                        left_wrist = pose_results.pose_landmarks.landmark[16]
+                        right_wrist = pose_results.pose_landmarks.landmark[15]
                         pitch_ref_y = float(shoulder_center[1] + args.relaxed_ratio * torso_height)
+                        pitch_anchor_x = None
 
-                        if landmark_has_xy(right_wrist):
-                            right_signal = (pitch_ref_y - float(right_wrist.y)) / torso_height
-                            pitch_value = signal_to_axis_value(right_signal, args.pitch_deadzone, args.pitch_full_scale)
+                        if landmark_has_xy(left_wrist):
+                            pitch_anchor_x = float(left_wrist.x)
+                            left_signal = (pitch_ref_y - float(left_wrist.y)) / torso_height
+                            pitch_value = signal_to_axis_value(left_signal, args.pitch_deadzone, args.pitch_full_scale)
+                        else:
+                            left_shoulder = pose_results.pose_landmarks.landmark[12]
+                            if landmark_has_xy(left_shoulder):
+                                pitch_anchor_x = float(left_shoulder.x)
 
                         yaw_deg = compute_forearm_yaw_deg(
                             pose_results.pose_landmarks,
                             13,
                             15,
-                            left_hand_landmarks,
+                            None,
                         )
                         if yaw_deg is not None:
                             yaw_value = signal_to_axis_value(yaw_deg, args.yaw_deadzone_deg, args.yaw_full_scale_deg)
-                        draw_pitch_guides(frame, pose_results.pose_landmarks, 12, pitch_ref_y, args.pitch_deadzone, torso_height)
+                        draw_pitch_guides(frame, pitch_anchor_x, pitch_ref_y, args.pitch_deadzone, torso_height)
+                        draw_yaw_guides(frame, pose_results.pose_landmarks, 13, 15, args.yaw_deadzone_deg)
 
                 if left_hand_landmarks is not None:
                     draw_hand(frame, left_hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS, (255, 200, 0), (255, 120, 0))
