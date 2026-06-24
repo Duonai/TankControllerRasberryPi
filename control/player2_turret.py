@@ -13,7 +13,7 @@ except ImportError:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="2P tank turret controller using MediaPipe Holistic")
+    parser = argparse.ArgumentParser(description="2P tank turret controller using MediaPipe Pose + Hands")
     parser.add_argument("--camera-id", type=int, default=0)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -46,6 +46,40 @@ def body_metrics(pose_landmarks) -> Optional[Tuple[np.ndarray, float, float]]:
     torso_height = max(float(abs(((left_hip.y + right_hip.y) * 0.5) - shoulder_center[1])), 1e-4)
     shoulder_width = max(float(abs(right_shoulder.x - left_shoulder.x)), 1e-4)
     return shoulder_center, torso_height, shoulder_width
+
+
+def split_hands(hand_results):
+    left_hand_landmarks = None
+    right_hand_landmarks = None
+
+    if hand_results.multi_hand_landmarks is None:
+        return left_hand_landmarks, right_hand_landmarks
+
+    handedness_list = hand_results.multi_handedness or []
+    for index, hand_landmarks in enumerate(hand_results.multi_hand_landmarks):
+        label = None
+        if index < len(handedness_list) and handedness_list[index].classification:
+            label = handedness_list[index].classification[0].label.lower()
+
+        if label == "left":
+            left_hand_landmarks = hand_landmarks
+        elif label == "right":
+            right_hand_landmarks = hand_landmarks
+
+    if left_hand_landmarks is None or right_hand_landmarks is None:
+        remaining = list(hand_results.multi_hand_landmarks)
+        if left_hand_landmarks is not None:
+            remaining = [hand for hand in remaining if hand is not left_hand_landmarks]
+        if right_hand_landmarks is not None:
+            remaining = [hand for hand in remaining if hand is not right_hand_landmarks]
+
+        remaining.sort(key=lambda hand: hand.landmark[0].x)
+        if left_hand_landmarks is None and remaining:
+            left_hand_landmarks = remaining.pop(0)
+        if right_hand_landmarks is None and remaining:
+            right_hand_landmarks = remaining.pop(-1)
+
+    return left_hand_landmarks, right_hand_landmarks
 
 
 def quantize_axis(value: float, deadzone: float) -> Tuple[str, float]:
@@ -140,18 +174,26 @@ def main() -> None:
     args = parse_args()
     camera = CameraSource(args.camera_id, args.width, args.height, args.fps)
     previous_tick = cv2.getTickCount()
-    holistic = mp.solutions.holistic
+    pose = mp.solutions.pose
+    hands = mp.solutions.hands
     gesture_tracker = HandGestureTracker()
     fire_text = "FIRE: idle"
     fire_until = 0.0
+    hand_model_complexity = 0 if args.model_complexity == 0 else 1
 
-    with holistic.Holistic(
+    with pose.Pose(
         static_image_mode=False,
         model_complexity=args.model_complexity,
         smooth_landmarks=True,
         min_detection_confidence=args.min_detection_conf,
         min_tracking_confidence=args.min_tracking_conf,
-    ) as model:
+    ) as pose_model, hands.Hands(
+        static_image_mode=False,
+        model_complexity=hand_model_complexity,
+        max_num_hands=2,
+        min_detection_confidence=args.min_detection_conf,
+        min_tracking_confidence=args.min_tracking_conf,
+    ) as hand_model:
         try:
             while True:
                 frame = camera.read_bgr()
@@ -160,8 +202,11 @@ def main() -> None:
 
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 rgb.flags.writeable = False
-                results = model.process(rgb)
+                pose_results = pose_model.process(rgb)
+                hand_results = hand_model.process(rgb)
                 rgb.flags.writeable = True
+
+                left_hand_landmarks, right_hand_landmarks = split_hands(hand_results)
 
                 yaw_value = 0.0
                 yaw_deg = None
@@ -171,13 +216,13 @@ def main() -> None:
                 left_state = "missing"
                 right_state = "missing"
 
-                if results.pose_landmarks is not None:
-                    draw_body_landmarks(frame, results.pose_landmarks)
-                    highlight_upper_body(frame, results.pose_landmarks)
-                    metrics = body_metrics(results.pose_landmarks)
+                if pose_results.pose_landmarks is not None:
+                    draw_body_landmarks(frame, pose_results.pose_landmarks)
+                    highlight_upper_body(frame, pose_results.pose_landmarks)
+                    metrics = body_metrics(pose_results.pose_landmarks)
                     if metrics is not None:
                         shoulder_center, torso_height, shoulder_width = metrics
-                        right_wrist = resolve_wrist_landmark(results.pose_landmarks, 16, results.right_hand_landmarks)
+                        right_wrist = resolve_wrist_landmark(pose_results.pose_landmarks, 16, right_hand_landmarks)
                         pitch_ref_y = float(shoulder_center[1] + args.relaxed_ratio * torso_height)
 
                         if landmark_has_xy(right_wrist):
@@ -185,26 +230,26 @@ def main() -> None:
                             pitch_value = signal_to_axis_value(right_signal, args.pitch_deadzone, args.pitch_full_scale)
 
                         yaw_deg = compute_forearm_yaw_deg(
-                            results.pose_landmarks,
+                            pose_results.pose_landmarks,
                             13,
                             15,
-                            results.left_hand_landmarks,
+                            left_hand_landmarks,
                         )
                         if yaw_deg is not None:
                             yaw_value = signal_to_axis_value(yaw_deg, args.yaw_deadzone_deg, args.yaw_full_scale_deg)
-                        draw_pitch_guides(frame, results.pose_landmarks, 12, pitch_ref_y, args.pitch_deadzone, torso_height)
+                        draw_pitch_guides(frame, pose_results.pose_landmarks, 12, pitch_ref_y, args.pitch_deadzone, torso_height)
 
-                if results.left_hand_landmarks is not None:
-                    draw_hand(frame, results.left_hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS, (255, 200, 0), (255, 120, 0))
-                    left_state = gesture_tracker.smooth_state("left", classify_hand_state(results.left_hand_landmarks))
+                if left_hand_landmarks is not None:
+                    draw_hand(frame, left_hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS, (255, 200, 0), (255, 120, 0))
+                    left_state = gesture_tracker.smooth_state("left", classify_hand_state(left_hand_landmarks))
                     fire_command = gesture_tracker.update("left", left_state)
                     if fire_command is not None:
                         fire_text = f"FIRE: {fire_command}"
                         fire_until = time.monotonic() + 1.0
 
-                if results.right_hand_landmarks is not None:
-                    draw_hand(frame, results.right_hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS, (255, 0, 200), (180, 120, 255))
-                    right_state = gesture_tracker.smooth_state("right", classify_hand_state(results.right_hand_landmarks))
+                if right_hand_landmarks is not None:
+                    draw_hand(frame, right_hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS, (255, 0, 200), (180, 120, 255))
+                    right_state = gesture_tracker.smooth_state("right", classify_hand_state(right_hand_landmarks))
 
                 if time.monotonic() >= fire_until:
                     fire_text = "FIRE: idle"

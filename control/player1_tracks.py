@@ -24,7 +24,7 @@ class TrackOutput:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="1P tank track controller using MediaPipe Holistic")
+    parser = argparse.ArgumentParser(description="1P tank track controller using MediaPipe Pose")
     parser.add_argument("--camera-id", type=int, default=0)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -168,9 +168,9 @@ def main() -> None:
     args = parse_args()
     camera = CameraSource(args.camera_id, args.width, args.height, args.fps)
     previous_tick = cv2.getTickCount()
-    holistic = mp.solutions.holistic
+    pose = mp.solutions.pose
 
-    with holistic.Holistic(
+    with pose.Pose(
         static_image_mode=False,
         model_complexity=args.model_complexity,
         smooth_landmarks=True,
@@ -194,8 +194,8 @@ def main() -> None:
                     highlight_upper_body(frame, results.pose_landmarks)
                     output = compute_track_output(
                         results.pose_landmarks,
-                        results.left_hand_landmarks,
-                        results.right_hand_landmarks,
+                        None,
+                        None,
                         args,
                     )
                     if output is not None:

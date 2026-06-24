@@ -54,16 +54,20 @@ class CameraSource:
         self.cap: Optional[cv2.VideoCapture] = None
 
         if picamera2_module is not None:
-            self.mode = "picamera2"
-            self.picam = picamera2_module.Picamera2()
-            config = self.picam.create_video_configuration(
-                main={"size": (width, height), "format": "RGB888"},
-                controls={"FrameRate": fps},
-            )
-            self.picam.configure(config)
-            self.picam.start()
-            print("[INFO] Camera source: Picamera2")
-            return
+            try:
+                self.mode = "picamera2"
+                self.picam = picamera2_module.Picamera2(camera_num=camera_id)
+                config = self.picam.create_video_configuration(
+                    main={"size": (width, height), "format": "RGB888"},
+                    controls={"FrameRate": fps},
+                )
+                self.picam.configure(config)
+                self.picam.start()
+                print(f"[INFO] Camera source: Picamera2 camera_id={camera_id}")
+                return
+            except Exception:
+                self.mode = "opencv"
+                self.picam = None
 
         self.cap = cv2.VideoCapture(camera_id)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -74,7 +78,7 @@ class CameraSource:
         if not self.cap.isOpened():
             raise RuntimeError("웹캠을 열 수 없습니다. /dev/video0 또는 카메라 연결 상태를 확인하세요.")
 
-        print("[INFO] Camera source: OpenCV VideoCapture")
+        print(f"[INFO] Camera source: OpenCV VideoCapture camera_id={camera_id}")
 
     def read_bgr(self) -> np.ndarray:
         if self.mode == "picamera2":
