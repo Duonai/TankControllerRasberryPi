@@ -1,6 +1,6 @@
 import argparse
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import cv2
 import mediapipe as mp
@@ -23,7 +23,7 @@ class TrackOutput:
     relaxed_y: float
 
 
-def parse_args() -> argparse.Namespace:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="1P tank track controller using MediaPipe Pose")
     parser.add_argument("--camera-id", type=int, default=0)
     parser.add_argument("--width", type=int, default=640)
@@ -36,7 +36,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--deadzone", type=float, default=0.12, help="Neutral band as a fraction of torso height")
     parser.add_argument("--full-scale", type=float, default=0.42, help="Hand movement for full track command")
     parser.add_argument("--relaxed-ratio", type=float, default=0.42, help="Comfortable wrist height below shoulders")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_arg_parser().parse_args()
+
+
+def serialize_track_result(output: Optional[TrackOutput]) -> Dict[str, Any]:
+    result = {
+        "has_pose": output is not None,
+        "left_value": 0.0,
+        "right_value": 0.0,
+        "left_label": "STOP",
+        "right_label": "STOP",
+        "drive_label": "IDLE",
+    }
+
+    if output is not None:
+        result.update(
+            {
+                "left_value": round(output.left_value, 4),
+                "right_value": round(output.right_value, 4),
+                "left_label": output.left_label,
+                "right_label": output.right_label,
+                "drive_label": output.drive_label,
+            }
+        )
+
+    return result
 
 
 def compute_body_metrics(pose_landmarks) -> Optional[Tuple[np.ndarray, np.ndarray, float, float]]:
@@ -164,10 +192,10 @@ def draw_status(frame: np.ndarray, fps: float, output: Optional[TrackOutput]) ->
     cv2.putText(frame, "Press q or ESC to exit", (16, 218), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
 
-def main() -> None:
-    args = parse_args()
+def run_controller(args: argparse.Namespace, on_result: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
     camera = CameraSource(args.camera_id, args.width, args.height, args.fps)
     previous_tick = cv2.getTickCount()
+    frame_id = 0
     pose = mp.solutions.pose
 
     with pose.Pose(
@@ -205,6 +233,16 @@ def main() -> None:
                 elapsed = (current_tick - previous_tick) / cv2.getTickFrequency()
                 previous_tick = current_tick
                 fps = 1.0 / elapsed if elapsed > 0 else 0.0
+                frame_id += 1
+
+                if on_result is not None:
+                    on_result(
+                        {
+                            "frame_id": frame_id,
+                            "fps": round(fps, 2),
+                            "result": serialize_track_result(output),
+                        }
+                    )
 
                 draw_status(frame, fps, output)
                 cv2.imshow("1P Tank Tracks", frame)
@@ -215,6 +253,11 @@ def main() -> None:
         finally:
             camera.close()
             cv2.destroyAllWindows()
+
+
+def main() -> None:
+    args = parse_args()
+    run_controller(args)
 
 
 if __name__ == "__main__":

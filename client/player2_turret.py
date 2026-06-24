@@ -1,6 +1,6 @@
 import argparse
 import time
-from typing import Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import cv2
 import mediapipe as mp
@@ -12,7 +12,7 @@ except ImportError:
     from common import CameraSource, HandGestureTracker, classify_hand_state, draw_body_landmarks, draw_hand, highlight_upper_body, landmark_has_xy, point_xy, resolve_wrist_landmark
 
 
-def parse_args() -> argparse.Namespace:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="2P tank turret controller using MediaPipe Pose + Hands")
     parser.add_argument("--camera-id", type=int, default=0)
     parser.add_argument("--width", type=int, default=640)
@@ -27,7 +27,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pitch-deadzone", type=float, default=0.12, help="Neutral band as a fraction of torso height")
     parser.add_argument("--pitch-full-scale", type=float, default=0.38, help="Wrist travel for full barrel speed")
     parser.add_argument("--relaxed-ratio", type=float, default=0.42, help="Comfortable wrist height below shoulders")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_arg_parser().parse_args()
+
+
+def serialize_turret_result(
+    yaw_value: float,
+    yaw_deg: Optional[float],
+    pitch_value: float,
+    pitch_ref_y: Optional[float],
+    fire_text: str,
+    left_state: str,
+    right_state: str,
+    has_pose: bool,
+) -> Dict[str, Any]:
+    fire_command = "idle"
+    if ":" in fire_text:
+        fire_command = fire_text.split(":", 1)[1].strip()
+
+    return {
+        "has_pose": has_pose,
+        "yaw_value": round(yaw_value, 4),
+        "yaw_deg": None if yaw_deg is None else round(yaw_deg, 2),
+        "yaw_label": yaw_label(yaw_value),
+        "pitch_value": round(pitch_value, 4),
+        "pitch_ref_y": None if pitch_ref_y is None else round(pitch_ref_y, 4),
+        "pitch_label": pitch_label(pitch_value),
+        "fire": fire_command,
+        "left_hand_state": left_state,
+        "right_hand_state": right_state,
+    }
 
 
 def body_metrics(pose_landmarks) -> Optional[Tuple[np.ndarray, float, float]]:
@@ -259,10 +291,10 @@ def draw_yaw_guides(
     )
 
 
-def main() -> None:
-    args = parse_args()
+def run_controller(args: argparse.Namespace, on_result: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
     camera = CameraSource(args.camera_id, args.width, args.height, args.fps)
     previous_tick = cv2.getTickCount()
+    frame_id = 0
     pose = mp.solutions.pose
     hands = mp.solutions.hands
     gesture_tracker = HandGestureTracker()
@@ -355,6 +387,25 @@ def main() -> None:
                 elapsed = (current_tick - previous_tick) / cv2.getTickFrequency()
                 previous_tick = current_tick
                 fps = 1.0 / elapsed if elapsed > 0 else 0.0
+                frame_id += 1
+
+                if on_result is not None:
+                    on_result(
+                        {
+                            "frame_id": frame_id,
+                            "fps": round(fps, 2),
+                            "result": serialize_turret_result(
+                                yaw_value=yaw_value,
+                                yaw_deg=yaw_deg,
+                                pitch_value=pitch_value,
+                                pitch_ref_y=pitch_ref_y,
+                                fire_text=fire_text,
+                                left_state=left_state,
+                                right_state=right_state,
+                                has_pose=pose_results.pose_landmarks is not None,
+                            ),
+                        }
+                    )
 
                 draw_status(
                     frame,
@@ -375,6 +426,11 @@ def main() -> None:
         finally:
             camera.close()
             cv2.destroyAllWindows()
+
+
+def main() -> None:
+    args = parse_args()
+    run_controller(args)
 
 
 if __name__ == "__main__":

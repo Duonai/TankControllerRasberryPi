@@ -1,0 +1,37 @@
+{
+  "network_profiles": {
+    "primary": {
+      "pc_host": "10.56.130.242",
+      "pc_port": 5000,
+      "pc_bind_host": "0.0.0.0"
+    },
+    "alternate": {
+      "pc_host": "192.168.0.12",
+      "pc_port": 5000,
+      "pc_bind_host": "0.0.0.0"
+    }
+  },
+  "nodes": {
+    "pc_server": {
+      "profile": "primary",
+      "bind_host": "0.0.0.0",
+      "bind_port": 5000
+    },
+    "player1_tracks": {
+      "profile": "primary",
+      "device_id": "rpi1",
+      "server_port": 5000,
+      "send_interval": 0.05,
+      "use_fake_signal": false,
+      "fake_signal_interval": 0.05
+    },
+    "player2_turret": {
+      "profile": "primary",
+      "device_id": "rpi2",
+      "server_port": 5000,
+      "send_interval": 0.05,
+      "use_fake_signal": false,
+      "fake_signal_interval": 0.05
+    }
+  }
+}
