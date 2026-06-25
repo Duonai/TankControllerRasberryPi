@@ -1,7 +1,7 @@
 {
   "network_profiles": {
     "primary": {
-      "pc_host": "10.56.130.242",
+      "pc_host": "10.56.130.131",
       "pc_port": 5000,
       "pc_bind_host": "0.0.0.0"
     },
