@@ -91,11 +91,11 @@ def compute_body_metrics(pose_landmarks) -> Optional[Tuple[np.ndarray, np.ndarra
 
 
 def signal_to_track_value(signal: float, deadzone: float, full_scale: float) -> float:
-    if abs(signal) <= deadzone:
-        return 0.0
-
-    magnitude = min((abs(signal) - deadzone) / max(full_scale - deadzone, 1e-4), 1.0)
-    return float(np.sign(signal) * magnitude)
+    if signal >= deadzone:
+        return 1.0
+    if signal <= -deadzone:
+        return -1.0
+    return 0.0
 
 
 def label_from_value(value: float) -> str:
@@ -132,15 +132,15 @@ def compute_track_output(pose_landmarks, left_hand_landmarks, right_hand_landmar
         return None
 
     shoulder_center, _hip_center, torso_height, _shoulder_width = metrics
-    left_wrist = resolve_wrist_landmark(pose_landmarks, 15, left_hand_landmarks)
-    right_wrist = resolve_wrist_landmark(pose_landmarks, 16, right_hand_landmarks)
+    left_wrist = resolve_wrist_landmark(pose_landmarks, 16, left_hand_landmarks)
+    right_wrist = resolve_wrist_landmark(pose_landmarks, 15, right_hand_landmarks)
 
     if not landmark_has_xy(left_wrist) or not landmark_has_xy(right_wrist):
         return None
 
     relaxed_y = float(shoulder_center[1] + args.relaxed_ratio * torso_height)
-    left_signal = (float(left_wrist.y) - relaxed_y) / torso_height
-    right_signal = (float(right_wrist.y) - relaxed_y) / torso_height
+    left_signal = (relaxed_y - float(left_wrist.y)) / torso_height
+    right_signal = (relaxed_y - float(right_wrist.y)) / torso_height
 
     left_value = signal_to_track_value(left_signal, args.deadzone, args.full_scale)
     right_value = signal_to_track_value(right_signal, args.deadzone, args.full_scale)
@@ -187,7 +187,7 @@ def draw_status(frame: np.ndarray, fps: float, output: Optional[TrackOutput]) ->
         cv2.putText(frame, f"L track: {output.left_label} {output.left_value:+.2f}", (16, 94), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2, cv2.LINE_AA)
         cv2.putText(frame, f"R track: {output.right_label} {output.right_value:+.2f}", (16, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 180), 2, cv2.LINE_AA)
         cv2.putText(frame, "Hands near chest = stop", (16, 158), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(frame, "Lower slightly = forward, raise slightly = reverse", (16, 186), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (220, 220, 220), 2, cv2.LINE_AA)
+        cv2.putText(frame, "Raise hand = track forward, lower hand = track reverse", (16, 186), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (220, 220, 220), 2, cv2.LINE_AA)
 
     cv2.putText(frame, "Press q or ESC to exit", (16, 218), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
