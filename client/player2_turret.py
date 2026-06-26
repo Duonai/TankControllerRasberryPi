@@ -18,14 +18,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
-    parser.add_argument("--flip", action="store_true", help="Mirror the preview horizontally")
+    parser.add_argument("--flip", action="store_true", default=True, help="Mirror the preview horizontally (default: enabled)")
+    parser.add_argument("--no-flip", dest="flip", action="store_false", help="Disable horizontal preview mirroring")
     parser.add_argument("--model-complexity", type=int, default=0, choices=(0, 1, 2))
     parser.add_argument("--min-detection-conf", type=float, default=0.5)
     parser.add_argument("--min-tracking-conf", type=float, default=0.5)
+    parser.add_argument("--yaw-neutral-offset-deg", type=float, default=-15.0, help="Neutral forearm tilt offset toward the torso")
     parser.add_argument("--yaw-deadzone-deg", type=float, default=18.0, help="Forearm tilt deadzone in degrees")
-    parser.add_argument("--yaw-full-scale-deg", type=float, default=55.0, help="Forearm tilt that maps to full turret speed")
-    parser.add_argument("--pitch-deadzone", type=float, default=0.16, help="Neutral band as a fraction of torso height")
-    parser.add_argument("--pitch-full-scale", type=float, default=0.38, help="Wrist travel for full barrel speed")
+    parser.add_argument("--yaw-full-scale-deg", type=float, default=50.0, help="Forearm tilt that maps to full turret speed")
+    parser.add_argument("--pitch-deadzone", type=float, default=0.15, help="Neutral band as a fraction of torso height")
+    parser.add_argument("--pitch-full-scale", type=float, default=0.40, help="Wrist travel for full barrel speed")
     parser.add_argument("--relaxed-ratio", type=float, default=0.42, help="Comfortable wrist height below shoulders")
     return parser
 
@@ -172,7 +174,13 @@ def signal_to_axis_value(signal: float, deadzone: float, full_scale: float) -> f
     return float(np.sign(signal) * magnitude)
 
 
-def compute_forearm_yaw_deg(pose_landmarks, elbow_idx: int, wrist_idx: int, hand_landmarks=None) -> Optional[float]:
+def compute_forearm_yaw_deg(
+    pose_landmarks,
+    elbow_idx: int,
+    wrist_idx: int,
+    hand_landmarks=None,
+    neutral_offset_deg: float = 0.0,
+) -> Optional[float]:
     elbow = pose_landmarks.landmark[elbow_idx]
     wrist = resolve_wrist_landmark(pose_landmarks, wrist_idx, hand_landmarks)
     if not landmark_has_xy(elbow) or not landmark_has_xy(wrist):
@@ -183,7 +191,8 @@ def compute_forearm_yaw_deg(pose_landmarks, elbow_idx: int, wrist_idx: int, hand
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:
         return None
 
-    return float(np.degrees(np.arctan2(dx, -dy)))
+    raw_yaw_deg = float(np.degrees(np.arctan2(dx, -dy)))
+    return raw_yaw_deg - neutral_offset_deg
 
 
 def yaw_label(value: float) -> str:
@@ -249,6 +258,7 @@ def draw_yaw_guides(
     pose_landmarks,
     elbow_idx: int,
     wrist_idx: int,
+    neutral_offset_deg: float,
     deadzone_deg: float,
 ) -> None:
     elbow = pose_landmarks.landmark[elbow_idx]
@@ -263,17 +273,21 @@ def draw_yaw_guides(
     guide_radius = min(max(int(forearm_length * 0.75), 42), 90)
     guide_color = (255, 80, 80)
     boundary_color = (255, 0, 255)
+    neutral_rad = np.radians(neutral_offset_deg)
 
     cv2.circle(frame, tuple(elbow_px), guide_radius, guide_color, 1)
     cv2.line(
         frame,
         tuple(elbow_px),
-        (int(elbow_px[0]), int(elbow_px[1] - guide_radius)),
+        (
+            int(elbow_px[0] + np.sin(neutral_rad) * guide_radius),
+            int(elbow_px[1] - np.cos(neutral_rad) * guide_radius),
+        ),
         guide_color,
         1,
     )
 
-    for angle_deg, color in ((-deadzone_deg, boundary_color), (deadzone_deg, boundary_color)):
+    for angle_deg, color in ((neutral_offset_deg - deadzone_deg, boundary_color), (neutral_offset_deg + deadzone_deg, boundary_color)):
         angle_rad = np.radians(angle_deg)
         end_x = int(elbow_px[0] + np.sin(angle_rad) * guide_radius)
         end_y = int(elbow_px[1] - np.cos(angle_rad) * guide_radius)
@@ -281,7 +295,7 @@ def draw_yaw_guides(
 
     cv2.putText(
         frame,
-        f"STOP +/-{deadzone_deg:.0f} deg",
+        f"NEUTRAL {neutral_offset_deg:.0f} deg  STOP +/-{deadzone_deg:.0f}",
         (int(elbow_px[0] - guide_radius), max(int(elbow_px[1] - guide_radius - 8), 20)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.45,
@@ -362,11 +376,12 @@ def run_controller(args: argparse.Namespace, on_result: Optional[Callable[[Dict[
                             13,
                             15,
                             None,
+                            args.yaw_neutral_offset_deg,
                         )
                         if yaw_deg is not None:
                             yaw_value = signal_to_axis_value(yaw_deg, args.yaw_deadzone_deg, args.yaw_full_scale_deg)
                         draw_pitch_guides(frame, pitch_anchor_x, pitch_ref_y, args.pitch_deadzone, torso_height)
-                        draw_yaw_guides(frame, pose_results.pose_landmarks, 13, 15, args.yaw_deadzone_deg)
+                        draw_yaw_guides(frame, pose_results.pose_landmarks, 13, 15, args.yaw_neutral_offset_deg, args.yaw_deadzone_deg)
 
                 if left_hand_landmarks is not None:
                     draw_hand(frame, left_hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS, (255, 200, 0), (255, 120, 0))
