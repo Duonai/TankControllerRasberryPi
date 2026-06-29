@@ -24,6 +24,7 @@ def parse_launcher_args() -> tuple[argparse.Namespace, argparse.Namespace]:
     launcher = argparse.ArgumentParser(description="Run player2 turret with external JSON-configured streaming.")
     launcher.add_argument("--config", default="config/runtime_config.json", help="Path to runtime JSON config")
     launcher.add_argument("--profile", default="", help="Override network profile name")
+    launcher.add_argument("--port", type=int, default=None, help="Override destination server port from config")
     launcher_args, remaining = launcher.parse_known_args()
 
     controller_args = build_arg_parser().parse_args(remaining)
@@ -34,10 +35,11 @@ def main() -> None:
     launcher_args, controller_args = parse_launcher_args()
     config = load_runtime_config(launcher_args.config)
     sender_conf = resolve_sender_config(config, "player2_turret", launcher_args.profile)
+    port = launcher_args.port if launcher_args.port is not None else sender_conf["port"]
 
     sender = ResilientJsonSender(
         host=sender_conf["host"],
-        port=sender_conf["port"],
+        port=port,
         role="player2_turret",
         device_id=sender_conf["device_id"],
         send_interval=sender_conf["send_interval"],
@@ -45,7 +47,7 @@ def main() -> None:
 
     print(
         "[RUN] player2_turret "
-        f"profile={sender_conf['profile']} -> {sender_conf['host']}:{sender_conf['port']} "
+        f"profile={sender_conf['profile']} -> {sender_conf['host']}:{port} "
         f"device_id={sender_conf['device_id']} fake={sender_conf['use_fake_signal']}"
     )
 
